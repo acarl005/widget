@@ -1,15 +1,19 @@
 use anyhow::{Context, Result};
 use cairo::{Context as CairoContext, Format, ImageSurface};
 use log::{error, info};
-use std::{fs, os::unix::io::{AsRawFd, BorrowedFd}, time::{Duration, Instant}, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
-use wayland_client::{
-    protocol::{wl_compositor, wl_surface, wl_shm, wl_shm_pool, wl_buffer, wl_registry, wl_callback},
-    Connection, Dispatch, QueueHandle,
+use std::{
+    fs,
+    os::unix::io::{AsRawFd, BorrowedFd},
+    time::Duration,
 };
-use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1, zwlr_layer_surface_v1,
+use wayland_client::{
+    Connection, Dispatch, QueueHandle,
+    protocol::{
+        wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    },
 };
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 // Application state
 struct App {
@@ -38,8 +42,11 @@ impl App {
     }
 
     fn render(&self, qhandle: &QueueHandle<Self>) -> Result<()> {
-        info!("Render called with dimensions: {}x{}", self.width, self.height);
-        
+        info!(
+            "Render called with dimensions: {}x{}",
+            self.width, self.height
+        );
+
         if self.surface.is_none() || self.shm.is_none() {
             error!("Missing surface or shm in render");
             return Ok(());
@@ -47,12 +54,13 @@ impl App {
 
         let surface = self.surface.as_ref().unwrap();
         let shm = self.shm.as_ref().unwrap();
-        
+
         info!("Starting render process...");
 
         // Create a Cairo surface
-        let mut cairo_surface = ImageSurface::create(Format::ARgb32, self.width as i32, self.height as i32)
-            .context("Failed to create Cairo surface")?;
+        let mut cairo_surface =
+            ImageSurface::create(Format::ARgb32, self.width as i32, self.height as i32)
+                .context("Failed to create Cairo surface")?;
         let cr = CairoContext::new(&cairo_surface).context("Failed to create Cairo context")?;
 
         // Clear the background (transparent)
@@ -81,11 +89,11 @@ impl App {
         let radius = self.width.min(self.height) as f64 / 4.0;
         let center_x = self.width as f64 / 2.0;
         let center_y = self.height as f64 - radius - 40.0; // Position near bottom with some margin
-        
+
         // Start from bottom left and draw clockwise
         let start_angle = std::f64::consts::PI; // Start from left (180 degrees)
         let sweep_angle = end_angle * std::f64::consts::PI; // Convert to half-circle sweep
-        
+
         cr.arc(
             center_x,
             center_y,
@@ -99,12 +107,12 @@ impl App {
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
         cr.set_font_size(24.0);
-        
+
         let text = format!("Load Avg: {:.2}", load_avg);
         let extents = cr.text_extents(&text)?;
         let x = (self.width as f64 - extents.width()) / 2.0;
         let y = self.height as f64 - 20.0; // Position the text a bit above the bottom
-        
+
         cr.move_to(x, y);
         cr.show_text(&text)?;
 
@@ -112,16 +120,20 @@ impl App {
         drop(cr);
 
         // Get the surface data
-        let data = cairo_surface.data().context("Failed to get Cairo surface data")?;
-        
+        let data = cairo_surface
+            .data()
+            .context("Failed to get Cairo surface data")?;
+
         // Create a shared memory buffer for Wayland
         let stride = (self.width * 4) as i32; // 4 bytes per pixel for ARGB32
         let size = stride * self.height as i32;
-        
+
         // Create a temporary file for shared memory
         let temp_file = tempfile::tempfile().context("Failed to create temp file")?;
-        temp_file.set_len(size as u64).context("Failed to set file size")?;
-        
+        temp_file
+            .set_len(size as u64)
+            .context("Failed to set file size")?;
+
         // Map the file into memory
         let mut mmap = unsafe {
             memmap2::MmapOptions::new()
@@ -129,10 +141,10 @@ impl App {
                 .map_mut(&temp_file)
                 .context("Failed to mmap file")?
         };
-        
+
         // Copy Cairo surface data to shared memory
         mmap.copy_from_slice(&data);
-        
+
         // Create shared memory pool
         let pool = shm.create_pool(
             unsafe { BorrowedFd::borrow_raw(temp_file.as_raw_fd()) },
@@ -140,7 +152,7 @@ impl App {
             qhandle,
             (),
         );
-        
+
         // Create buffer from the pool
         let buffer = pool.create_buffer(
             0,
@@ -155,7 +167,7 @@ impl App {
         // Attach buffer to surface and commit
         surface.attach(Some(&buffer), 0, 0);
         surface.commit();
-        
+
         info!("Render completed successfully");
         Ok(())
     }
@@ -178,10 +190,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                 version,
             } => {
                 info!("Global: {} {} {}", name, interface, version);
-                
+
                 match interface.as_str() {
                     "wl_compositor" => {
-                        let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(name, version, qhandle, ());
+                        let compositor = registry.bind::<wl_compositor::WlCompositor, _, _>(
+                            name,
+                            version,
+                            qhandle,
+                            (),
+                        );
                         state.compositor = Some(compositor);
                     }
                     "wl_shm" => {
@@ -189,11 +206,22 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                         state.shm = Some(shm);
                     }
                     "zwlr_layer_shell_v1" => {
-                        let layer_shell = registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, _, _>(name, version, qhandle, ());
+                        let layer_shell = registry
+                            .bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, _, _>(
+                                name,
+                                version,
+                                qhandle,
+                                (),
+                            );
                         state.layer_shell = Some(layer_shell);
                     }
                     "xdg_wm_base" => {
-                        let xdg_wm_base = registry.bind::<xdg_wm_base::XdgWmBase, _, _>(name, version, qhandle, ());
+                        let xdg_wm_base = registry.bind::<xdg_wm_base::XdgWmBase, _, _>(
+                            name,
+                            version,
+                            qhandle,
+                            (),
+                        );
                         state.xdg_wm_base = Some(xdg_wm_base);
                     }
                     _ => {}
@@ -294,7 +322,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
                 if let Err(e) = state.render(qhandle) {
                     error!("Frame callback render error: {}", e);
                 }
-                
+
                 // Schedule next frame callback after a 1-second delay
                 std::thread::sleep(Duration::from_secs(1));
                 if let Some(surface) = &state.surface {
@@ -345,15 +373,21 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
         _qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, width, height } => {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
                 info!("Layer surface configured: {}x{}", width, height);
                 state.width = width;
                 state.height = height;
                 if let Some(layer_surface) = &state.layer_surface {
                     layer_surface.ack_configure(serial);
                 }
-                state.render(_qhandle).unwrap_or_else(|e| error!("Render error: {}", e));
-                
+                state
+                    .render(_qhandle)
+                    .unwrap_or_else(|e| error!("Render error: {}", e));
+
                 // Schedule a frame callback to trigger periodic updates
                 if let Some(surface) = &state.surface {
                     let _callback = surface.frame(_qhandle, ());
@@ -383,7 +417,9 @@ fn main() -> Result<()> {
     let _registry = connection.display().get_registry(&qhandle, ());
 
     // Initial roundtrip to get globals
-    event_queue.roundtrip(&mut app).context("Failed to sync with compositor")?;
+    event_queue
+        .roundtrip(&mut app)
+        .context("Failed to sync with compositor")?;
 
     // Create surface and layer surface if we have the required globals
     if let (Some(compositor), Some(layer_shell)) = (&app.compositor, &app.layer_shell) {
@@ -402,10 +438,10 @@ fn main() -> Result<()> {
         // Configure layer surface to span the whole screen
         layer_surface.set_size(0, 0); // 0 means use full screen size
         layer_surface.set_anchor(
-            zwlr_layer_surface_v1::Anchor::Top |
-            zwlr_layer_surface_v1::Anchor::Bottom |
-            zwlr_layer_surface_v1::Anchor::Left |
-            zwlr_layer_surface_v1::Anchor::Right
+            zwlr_layer_surface_v1::Anchor::Top
+                | zwlr_layer_surface_v1::Anchor::Bottom
+                | zwlr_layer_surface_v1::Anchor::Left
+                | zwlr_layer_surface_v1::Anchor::Right,
         ); // Anchor to all edges to fill the screen
         layer_surface.set_exclusive_zone(0); // Don't reserve space, just show in background
         surface.commit();
@@ -413,7 +449,9 @@ fn main() -> Result<()> {
         app.layer_surface = Some(layer_surface);
 
         // Do another roundtrip to get the configure event
-        event_queue.roundtrip(&mut app).context("Failed to get layer surface configuration")?;
+        event_queue
+            .roundtrip(&mut app)
+            .context("Failed to get layer surface configuration")?;
     } else {
         error!("Missing required Wayland globals");
         return Err(anyhow::anyhow!("Missing required Wayland globals"));
@@ -423,6 +461,4 @@ fn main() -> Result<()> {
     loop {
         event_queue.blocking_dispatch(&mut app)?;
     }
-
-    Ok(())
 }
