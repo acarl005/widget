@@ -32,8 +32,8 @@ impl App {
             shm: None,
             surface: None,
             layer_surface: None,
-            width: 800,
-            height: 600,
+            width: 0,  // Will be set by layer surface configure event
+            height: 0, // Will be set by layer surface configure event
         }
     }
 
@@ -75,19 +75,27 @@ impl App {
         let normalized_load = (load_avg / num_cores).min(1.0);
         let end_angle = normalized_load * 2.0 * std::f64::consts::PI;
 
-        // Draw the arc
+        // Draw the arc at bottom center
         cr.set_source_rgb(0.0, 1.0, 0.0);
         cr.set_line_width(20.0);
+        let radius = self.width.min(self.height) as f64 / 4.0;
+        let center_x = self.width as f64 / 2.0;
+        let center_y = self.height as f64 - radius - 40.0; // Position near bottom with some margin
+        
+        // Start from bottom left and draw clockwise
+        let start_angle = std::f64::consts::PI; // Start from left (180 degrees)
+        let sweep_angle = end_angle * std::f64::consts::PI; // Convert to half-circle sweep
+        
         cr.arc(
-            self.width as f64 / 2.0,
-            self.height as f64 / 2.0,
-            self.width.min(self.height) as f64 / 4.0,
-            0.0,
-            end_angle,
+            center_x,
+            center_y,
+            radius,
+            start_angle,
+            start_angle + sweep_angle,
         );
         cr.stroke()?;
 
-        // Display the load average
+        // Display the load average below the arc
         cr.set_source_rgb(1.0, 1.0, 1.0);
         cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
         cr.set_font_size(24.0);
@@ -95,7 +103,7 @@ impl App {
         let text = format!("Load Avg: {:.2}", load_avg);
         let extents = cr.text_extents(&text)?;
         let x = (self.width as f64 - extents.width()) / 2.0;
-        let y = self.height as f64 / 2.0 + extents.height();
+        let y = self.height as f64 - 20.0; // Position the text a bit above the bottom
         
         cr.move_to(x, y);
         cr.show_text(&text)?;
@@ -391,9 +399,14 @@ fn main() -> Result<()> {
             (),
         );
 
-        // Configure layer surface
-        layer_surface.set_size(app.width, app.height);
-        layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
+        // Configure layer surface to span the whole screen
+        layer_surface.set_size(0, 0); // 0 means use full screen size
+        layer_surface.set_anchor(
+            zwlr_layer_surface_v1::Anchor::Top |
+            zwlr_layer_surface_v1::Anchor::Bottom |
+            zwlr_layer_surface_v1::Anchor::Left |
+            zwlr_layer_surface_v1::Anchor::Right
+        ); // Anchor to all edges to fill the screen
         layer_surface.set_exclusive_zone(0); // Don't reserve space, just show in background
         surface.commit();
 
