@@ -55,9 +55,11 @@ impl App {
             .context("Failed to create Cairo surface")?;
         let cr = CairoContext::new(&cairo_surface).context("Failed to create Cairo context")?;
 
-        // Clear the background
-        cr.set_source_rgb(0.2, 0.3, 0.8);
+        // Clear the background (transparent)
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+        cr.set_operator(cairo::Operator::Source);
         cr.paint()?;
+        cr.set_operator(cairo::Operator::Over);
 
         // Get CPU load average
         let load_avg = fs::read_to_string("/proc/loadavg")?
