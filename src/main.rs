@@ -68,7 +68,12 @@ impl App {
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0);
 
-        let end_angle = load_avg.min(1.0) * 2.0 * std::f64::consts::PI;
+        // Use the number of CPU cores as the maximum load for the arc
+        let num_cores = std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0);
+        let normalized_load = (load_avg / num_cores).min(1.0);
+        let end_angle = normalized_load * 2.0 * std::f64::consts::PI;
 
         // Draw the arc
         cr.set_source_rgb(0.0, 1.0, 0.0);
