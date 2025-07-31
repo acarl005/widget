@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use cairo::{Context as CairoContext, Format, ImageSurface};
 use log::{error, info};
-use std::{fs, os::unix::io::{AsRawFd, BorrowedFd}, time::{Duration, Instant}};
+use std::{fs, os::unix::io::{AsRawFd, BorrowedFd}, time::{Duration, Instant}, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
 use wayland_client::{
-    protocol::{wl_compositor, wl_surface, wl_shm, wl_shm_pool, wl_buffer, wl_registry},
+    protocol::{wl_compositor, wl_surface, wl_shm, wl_shm_pool, wl_buffer, wl_registry, wl_callback},
     Connection, Dispatch, QueueHandle,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -264,6 +264,35 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for App {
     }
 }
 
+// Callback event handling for frame callbacks
+impl Dispatch<wl_callback::WlCallback, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _data: &(),
+        _conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_callback::Event::Done { .. } => {
+                // Frame callback done - re-render and schedule next frame
+                info!("Frame callback done - triggering render");
+                if let Err(e) = state.render(qhandle) {
+                    error!("Frame callback render error: {}", e);
+                }
+                
+                // Schedule next frame callback after a 1-second delay
+                std::thread::sleep(Duration::from_secs(1));
+                if let Some(surface) = &state.surface {
+                    let _callback = surface.frame(qhandle, ());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // Layer shell event handling
 impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for App {
     fn event(
@@ -311,6 +340,12 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
                     layer_surface.ack_configure(serial);
                 }
                 state.render(_qhandle).unwrap_or_else(|e| error!("Render error: {}", e));
+                
+                // Schedule a frame callback to trigger periodic updates
+                if let Some(surface) = &state.surface {
+                    let _callback = surface.frame(_qhandle, ());
+                    // The callback will trigger in the frame callback handler
+                }
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 info!("Layer surface closed");
