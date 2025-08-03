@@ -1,11 +1,14 @@
-use anyhow::{Context, Result};
-use cairo::{Context as CairoContext, Format, ImageSurface};
-use log::{error, info};
 use std::{
+    f64::consts::PI,
     fs,
     os::unix::io::{AsRawFd, BorrowedFd},
+    thread,
     time::Duration,
 };
+
+use anyhow::{Context as _, Result};
+use cairo::{FontSlant, FontWeight, Format, ImageSurface};
+use log::{error, info};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
     protocol::{
@@ -15,7 +18,6 @@ use wayland_client::{
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
-// Application state
 struct App {
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
@@ -55,19 +57,18 @@ impl App {
         let surface = self.surface.as_ref().unwrap();
         let shm = self.shm.as_ref().unwrap();
 
-        info!("Starting render process...");
-
         // Create a Cairo surface
         let mut cairo_surface =
             ImageSurface::create(Format::ARgb32, self.width as i32, self.height as i32)
                 .context("Failed to create Cairo surface")?;
-        let cr = CairoContext::new(&cairo_surface).context("Failed to create Cairo context")?;
+        let cairo_ctx =
+            cairo::Context::new(&cairo_surface).context("Failed to create Cairo context")?;
 
         // Clear the background (transparent)
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-        cr.set_operator(cairo::Operator::Source);
-        cr.paint()?;
-        cr.set_operator(cairo::Operator::Over);
+        cairo_ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+        cairo_ctx.set_operator(cairo::Operator::Source);
+        cairo_ctx.paint()?;
+        cairo_ctx.set_operator(cairo::Operator::Over);
 
         // Get CPU load average
         let load_avg = fs::read_to_string("/proc/loadavg")?
@@ -77,47 +78,47 @@ impl App {
             .unwrap_or(0.0);
 
         // Use the number of CPU cores as the maximum load for the arc
-        let num_cores = std::thread::available_parallelism()
+        let num_cores = thread::available_parallelism()
             .map(|n| n.get() as f64)
             .unwrap_or(1.0);
         let normalized_load = (load_avg / num_cores).min(1.0);
-        let end_angle = normalized_load * 2.0 * std::f64::consts::PI;
+        let end_angle = normalized_load * 2.0 * PI;
 
         // Draw the arc at bottom center
-        cr.set_source_rgb(0.0, 1.0, 0.0);
-        cr.set_line_width(20.0);
+        cairo_ctx.set_source_rgb(0.0, 1.0, 0.0);
+        cairo_ctx.set_line_width(20.0);
         let radius = self.width.min(self.height) as f64 / 4.0;
         let center_x = self.width as f64 / 2.0;
         let center_y = self.height as f64 - radius - 40.0; // Position near bottom with some margin
 
         // Start from bottom left and draw clockwise
-        let start_angle = std::f64::consts::PI; // Start from left (180 degrees)
-        let sweep_angle = end_angle * std::f64::consts::PI; // Convert to half-circle sweep
+        let start_angle = PI; // Start from left (180 degrees)
+        let sweep_angle = end_angle * PI; // Convert to half-circle sweep
 
-        cr.arc(
+        cairo_ctx.arc(
             center_x,
             center_y,
             radius,
             start_angle,
             start_angle + sweep_angle,
         );
-        cr.stroke()?;
+        cairo_ctx.stroke()?;
 
         // Display the load average below the arc
-        cr.set_source_rgb(1.0, 1.0, 1.0);
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-        cr.set_font_size(24.0);
+        cairo_ctx.set_source_rgb(1.0, 1.0, 1.0);
+        cairo_ctx.select_font_face("Inconsolata Nerd Font", FontSlant::Normal, FontWeight::Bold);
+        cairo_ctx.set_font_size(24.0);
 
         let text = format!("Load Avg: {:.2}", load_avg);
-        let extents = cr.text_extents(&text)?;
+        let extents = cairo_ctx.text_extents(&text)?;
         let x = (self.width as f64 - extents.width()) / 2.0;
         let y = self.height as f64 - 20.0; // Position the text a bit above the bottom
 
-        cr.move_to(x, y);
-        cr.show_text(&text)?;
+        cairo_ctx.move_to(x, y);
+        cairo_ctx.show_text(&text)?;
 
         // Drop the Cairo context to release the surface
-        drop(cr);
+        drop(cairo_ctx);
 
         // Get the surface data
         let data = cairo_surface
@@ -173,7 +174,6 @@ impl App {
     }
 }
 
-// Registry event handling
 impl Dispatch<wl_registry::WlRegistry, ()> for App {
     fn event(
         state: &mut Self,
@@ -235,7 +235,6 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
     }
 }
 
-// Surface event handling
 impl Dispatch<wl_surface::WlSurface, ()> for App {
     fn event(
         _state: &mut Self,
@@ -249,7 +248,6 @@ impl Dispatch<wl_surface::WlSurface, ()> for App {
     }
 }
 
-// Compositor event handling
 impl Dispatch<wl_compositor::WlCompositor, ()> for App {
     fn event(
         _state: &mut Self,
@@ -263,7 +261,6 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for App {
     }
 }
 
-// Shm event handling
 impl Dispatch<wl_shm::WlShm, ()> for App {
     fn event(
         _state: &mut Self,
@@ -277,7 +274,6 @@ impl Dispatch<wl_shm::WlShm, ()> for App {
     }
 }
 
-// Shm pool event handling
 impl Dispatch<wl_shm_pool::WlShmPool, ()> for App {
     fn event(
         _state: &mut Self,
@@ -291,7 +287,6 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for App {
     }
 }
 
-// Buffer event handling
 impl Dispatch<wl_buffer::WlBuffer, ()> for App {
     fn event(
         _state: &mut Self,
@@ -305,7 +300,6 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for App {
     }
 }
 
-// Callback event handling for frame callbacks
 impl Dispatch<wl_callback::WlCallback, ()> for App {
     fn event(
         state: &mut Self,
@@ -317,14 +311,13 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
     ) {
         match event {
             wl_callback::Event::Done { .. } => {
-                // Frame callback done - re-render and schedule next frame
                 info!("Frame callback done - triggering render");
                 if let Err(e) = state.render(qhandle) {
                     error!("Frame callback render error: {}", e);
                 }
 
                 // Schedule next frame callback after a 1-second delay
-                std::thread::sleep(Duration::from_secs(1));
+                thread::sleep(Duration::from_secs(1));
                 if let Some(surface) = &state.surface {
                     let _callback = surface.frame(qhandle, ());
                 }
@@ -334,7 +327,6 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
     }
 }
 
-// Layer shell event handling
 impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for App {
     fn event(
         _state: &mut Self,
@@ -348,7 +340,6 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for App {
     }
 }
 
-// XDG WM Base event handling
 impl Dispatch<xdg_wm_base::XdgWmBase, ()> for App {
     fn event(
         _state: &mut Self,
@@ -362,7 +353,6 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for App {
     }
 }
 
-// Layer surface event handling
 impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
     fn event(
         state: &mut Self,
@@ -370,7 +360,7 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
         event: zwlr_layer_surface_v1::Event,
         _data: &(),
         _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
         match event {
             zwlr_layer_surface_v1::Event::Configure {
@@ -385,13 +375,13 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
                     layer_surface.ack_configure(serial);
                 }
                 state
-                    .render(_qhandle)
+                    .render(qhandle)
                     .unwrap_or_else(|e| error!("Render error: {}", e));
 
                 // Schedule a frame callback to trigger periodic updates
                 if let Some(surface) = &state.surface {
-                    let _callback = surface.frame(_qhandle, ());
                     // The callback will trigger in the frame callback handler
+                    let _callback = surface.frame(qhandle, ());
                 }
             }
             zwlr_layer_surface_v1::Event::Closed => {
@@ -405,15 +395,12 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for App {
 fn main() -> Result<()> {
     env_logger::init();
 
-    // Connect to Wayland
     let connection = Connection::connect_to_env().context("Failed to connect to Wayland")?;
     let mut event_queue = connection.new_event_queue();
     let qhandle = event_queue.handle();
 
-    // Create application
     let mut app = App::new();
 
-    // Get registry
     let _registry = connection.display().get_registry(&qhandle, ());
 
     // Initial roundtrip to get globals
@@ -435,8 +422,8 @@ fn main() -> Result<()> {
             (),
         );
 
-        // Configure layer surface to span the whole screen
-        layer_surface.set_size(0, 0); // 0 means use full screen size
+        // Configure layer surface to span the whole screen. 0 means use full screen size
+        layer_surface.set_size(0, 0);
         layer_surface.set_anchor(
             zwlr_layer_surface_v1::Anchor::Top
                 | zwlr_layer_surface_v1::Anchor::Bottom
@@ -457,7 +444,6 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("Missing required Wayland globals"));
     }
 
-    // Main event loop
     loop {
         event_queue.blocking_dispatch(&mut app)?;
     }
