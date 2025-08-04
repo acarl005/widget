@@ -1,6 +1,5 @@
 use std::{
     f64::consts::PI,
-    fs,
     os::unix::io::{AsRawFd, BorrowedFd},
     thread,
     time::Duration,
@@ -8,7 +7,9 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use cairo::{FontSlant, FontWeight, Format, ImageSurface};
+use itertools::Itertools as _;
 use log::{error, info};
+use sysinfo::System;
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
     protocol::{
@@ -27,10 +28,14 @@ struct App {
     layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
     width: u32,
     height: u32,
+    system: System,
 }
 
 impl App {
     fn new() -> Self {
+        let mut system = System::new();
+        system.refresh_cpu_all();
+
         App {
             compositor: None,
             layer_shell: None,
@@ -40,10 +45,11 @@ impl App {
             layer_surface: None,
             width: 0,  // Will be set by layer surface configure event
             height: 0, // Will be set by layer surface configure event
+            system,
         }
     }
 
-    fn render(&self, qhandle: &QueueHandle<Self>) -> Result<()> {
+    fn render(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
         info!(
             "Render called with dimensions: {}x{}",
             self.width, self.height
@@ -53,6 +59,8 @@ impl App {
             error!("Missing surface or shm in render");
             return Ok(());
         }
+
+        self.system.refresh_cpu_all();
 
         let surface = self.surface.as_ref().unwrap();
         let shm = self.shm.as_ref().unwrap();
@@ -70,39 +78,13 @@ impl App {
         cairo_ctx.paint()?;
         cairo_ctx.set_operator(cairo::Operator::Over);
 
-        // Get CPU load average
-        let load_avg = fs::read_to_string("/proc/loadavg")?
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
+        // Calculate average CPU usage across all cores
+        let cpus = self.system.cpus();
+        let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
+        let cpu_usage = (total_usage / cpus.len() as f32) as f64;
 
-        // Use the number of CPU cores as the maximum load for the arc
-        let num_cores = thread::available_parallelism()
-            .map(|n| n.get() as f64)
-            .unwrap_or(1.0);
-        let normalized_load = (load_avg / num_cores).min(1.0);
-        let end_angle = normalized_load * 2.0 * PI;
-
-        // Draw the arc at bottom center
-        cairo_ctx.set_source_rgb(0.0, 1.0, 0.0);
-        cairo_ctx.set_line_width(20.0);
-        let radius = self.width.min(self.height) as f64 / 4.0;
-        let center_x = self.width as f64 / 2.0;
-        let center_y = self.height as f64 - radius - 40.0; // Position near bottom with some margin
-
-        // Start from bottom left and draw clockwise
-        let start_angle = PI; // Start from left (180 degrees)
-        let sweep_angle = end_angle * PI; // Convert to half-circle sweep
-
-        cairo_ctx.arc(
-            center_x,
-            center_y,
-            radius,
-            start_angle,
-            start_angle + sweep_angle,
-        );
-        cairo_ctx.stroke()?;
+        // CPU usage is already a percentage (0-100), so normalize to 0-1
+        let normalized_load = (cpu_usage / 100.0).min(1.0);
 
         self.draw_main(&cairo_ctx)?;
 
@@ -208,6 +190,37 @@ impl App {
             2. * PI,
         );
         ctx.stroke()?;
+
+        let cpus = self.system.cpus();
+
+        ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
+        ctx.set_line_width(4.);
+        let top = 3. * PI / 2.;
+        for (i, mut cpu_pair) in cpus.iter().chunks(2).into_iter().enumerate() {
+            let Some(cpu1) = cpu_pair.next() else {
+                continue;
+            };
+            let radius = circle_radius - (i as f64) * 4. - 2.;
+            ctx.arc(
+                circle_center_x,
+                circle_center_y,
+                radius,
+                top,
+                top + (cpu1.cpu_usage() as f64) / 100. * PI / 2.,
+            );
+            ctx.stroke()?;
+
+            if let Some(cpu2) = cpu_pair.next() {
+                ctx.arc(
+                    circle_center_x,
+                    circle_center_y,
+                    radius,
+                    top - (cpu2.cpu_usage() as f64) / 100. * PI / 2.,
+                    top,
+                );
+                ctx.stroke()?;
+            }
+        }
 
         Ok(())
     }
