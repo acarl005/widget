@@ -104,18 +104,18 @@ impl App {
         );
         cairo_ctx.stroke()?;
 
+        self.draw_main(&cairo_ctx)?;
+
         // Display the load average below the arc
-        cairo_ctx.set_source_rgb(1.0, 1.0, 1.0);
+        cairo_ctx.set_source_rgba(1.0, 1.0, 1.0, 0.6);
         cairo_ctx.select_font_face("Inconsolata Nerd Font", FontSlant::Normal, FontWeight::Bold);
-        cairo_ctx.set_font_size(24.0);
+        cairo_ctx.set_font_size(16.0);
 
-        let text = format!("Load Avg: {:.2}", load_avg);
-        let extents = cairo_ctx.text_extents(&text)?;
-        let x = (self.width as f64 - extents.width()) / 2.0;
-        let y = self.height as f64 - 20.0; // Position the text a bit above the bottom
-
-        cairo_ctx.move_to(x, y);
-        cairo_ctx.show_text(&text)?;
+        let text = format!("{:.1}%", normalized_load * 100.);
+        let x = self.width as f64 / 2.0;
+        let y = self.height as f64 - 12.;
+        self.text_centered_at(&text, x, y, 16., &cairo_ctx)?;
+        self.text_centered_at(" ", x, y - 24., 32., &cairo_ctx)?;
 
         // Drop the Cairo context to release the surface
         drop(cairo_ctx);
@@ -170,6 +170,61 @@ impl App {
         surface.commit();
 
         info!("Render completed successfully");
+        Ok(())
+    }
+
+    fn draw_main(&self, ctx: &cairo::Context) -> Result<()> {
+        // Draw a circle with radial gradient at the bottom center
+        let circle_radius = 100.0;
+        let circle_center_x = self.width as f64 / 2.0;
+        let circle_center_y = self.height as f64 - 20.0;
+
+        // Create radial gradient pattern
+        let pattern = cairo::RadialGradient::new(
+            circle_center_x,
+            circle_center_y,
+            0.0, // Inner circle (center, radius)
+            circle_center_x,
+            circle_center_y,
+            circle_radius, // Outer circle (center, radius)
+        );
+
+        // Add gradient stops: bright center to transparent edge
+        pattern.add_color_stop_rgba(0., 0., 0., 0., 0.);
+        pattern.add_color_stop_rgba(0.62, 0., 0., 0., 0.);
+        pattern.add_color_stop_rgba(1., 208. / 255., 143. / 255., 1.0, 0.25);
+
+        ctx.set_source(&pattern).context("Error setting pattern")?;
+        ctx.arc(circle_center_x, circle_center_y, circle_radius, 0., 2. * PI);
+        ctx.fill()?;
+
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.set_line_width(2.);
+        ctx.arc(
+            circle_center_x,
+            circle_center_y,
+            circle_radius + 4.,
+            0.,
+            2. * PI,
+        );
+        ctx.stroke()?;
+
+        Ok(())
+    }
+
+    fn text_centered_at(
+        &self,
+        text: &str,
+        x: f64,
+        y: f64,
+        font_size: f64,
+        ctx: &cairo::Context,
+    ) -> Result<()> {
+        ctx.set_font_size(font_size);
+        let extents = ctx.text_extents(text)?;
+        let x = x - (extents.width() / 2.);
+        ctx.move_to(x, y);
+        ctx.show_text(text)?;
         Ok(())
     }
 }
