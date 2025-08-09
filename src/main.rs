@@ -15,7 +15,8 @@ use sysinfo::{Disk, Disks, System};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
     protocol::{
-        wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+        wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool,
+        wl_surface,
     },
 };
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
@@ -32,8 +33,10 @@ struct App {
     shm: Option<wl_shm::WlShm>,
     surface: Option<wl_surface::WlSurface>,
     layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
+    outputs: Vec<wl_output::WlOutput>,
     width: u32,
     height: u32,
+    scale_factor: i32,
     system: System,
     disks: Disks,
     cpu_usage_points: VecDeque<f64>,
@@ -51,8 +54,10 @@ impl App {
             shm: None,
             surface: None,
             layer_surface: None,
-            width: 0,  // Will be set by layer surface configure event
-            height: 0, // Will be set by layer surface configure event
+            outputs: Vec::new(),
+            width: 0,        // Will be updated by layer surface configure event
+            height: 0,       // Will be updated by layer surface configure event
+            scale_factor: 1, // Will be updated from output events
             system,
             disks,
             cpu_usage_points: Default::default(),
@@ -79,12 +84,17 @@ impl App {
 
         self.refresh_system();
 
-        // Create a Cairo surface
+        // Create a Cairo surface scaled for high-DPI
+        let physical_width = (self.width as i32) * self.scale_factor;
+        let physical_height = (self.height as i32) * self.scale_factor;
         let mut cairo_surface =
-            ImageSurface::create(Format::ARgb32, self.width as i32, self.height as i32)
+            ImageSurface::create(Format::ARgb32, physical_width, physical_height)
                 .context("Failed to create Cairo surface")?;
         let cairo_ctx =
             cairo::Context::new(&cairo_surface).context("Failed to create Cairo context")?;
+
+        // Scale the Cairo context to work in logical coordinates
+        cairo_ctx.scale(self.scale_factor as f64, self.scale_factor as f64);
 
         // Clear the background (transparent)
         cairo_ctx.set_source_rgba(0., 0., 0., 0.);
@@ -102,9 +112,9 @@ impl App {
             .data()
             .context("Failed to get Cairo surface data")?;
 
-        // Create a shared memory buffer for Wayland
-        let stride = (self.width * 4) as i32; // 4 bytes per pixel for ARGB32
-        let size = stride * self.height as i32;
+        // Create a shared memory buffer for Wayland (using physical dimensions)
+        let stride = (physical_width * 4) as i32; // 4 bytes per pixel for ARGB32
+        let size = stride * physical_height as i32;
 
         // Create a temporary file for shared memory
         let temp_file = tempfile::tempfile().context("Failed to create temp file")?;
@@ -132,11 +142,11 @@ impl App {
             (),
         );
 
-        // Create buffer from the pool
+        // Create buffer from the pool (using physical dimensions)
         let buffer = pool.create_buffer(
             0,
-            self.width as i32,
-            self.height as i32,
+            physical_width,
+            physical_height,
             stride,
             wl_shm::Format::Argb8888,
             qhandle,
@@ -145,6 +155,7 @@ impl App {
 
         // Attach buffer to surface and commit
         let surface = self.surface.as_ref().unwrap();
+        surface.set_buffer_scale(self.scale_factor);
         surface.attach(Some(&buffer), 0, 0);
         surface.commit();
 
@@ -388,6 +399,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                         let shm = registry.bind::<wl_shm::WlShm, _, _>(name, version, qhandle, ());
                         state.shm = Some(shm);
                     }
+                    "wl_output" => {
+                        let output =
+                            registry.bind::<wl_output::WlOutput, _, _>(name, version, qhandle, ());
+                        state.outputs.push(output);
+                    }
                     "zwlr_layer_shell_v1" => {
                         let layer_shell = registry
                             .bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, _, _>(
@@ -533,6 +549,25 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for App {
         _qhandle: &QueueHandle<Self>,
     ) {
         // XDG WM Base events
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_output::Event::Scale { factor } => {
+                info!("Output scale factor: {}", factor);
+                state.scale_factor = factor;
+            }
+            _ => {}
+        }
     }
 }
 
