@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     f64::consts::PI,
     os::unix::io::{AsRawFd, BorrowedFd},
     thread,
@@ -19,6 +20,8 @@ use wayland_client::{
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
+const MAX_CPU_USAGE_POINTS: usize = 50;
+
 struct App {
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
@@ -29,6 +32,7 @@ struct App {
     width: u32,
     height: u32,
     system: System,
+    cpu_usage_points: VecDeque<f64>,
 }
 
 impl App {
@@ -46,6 +50,7 @@ impl App {
             width: 0,  // Will be set by layer surface configure event
             height: 0, // Will be set by layer surface configure event
             system,
+            cpu_usage_points: Default::default(),
         }
     }
 
@@ -62,9 +67,6 @@ impl App {
 
         self.system.refresh_cpu_all();
 
-        let surface = self.surface.as_ref().unwrap();
-        let shm = self.shm.as_ref().unwrap();
-
         // Create a Cairo surface
         let mut cairo_surface =
             ImageSurface::create(Format::ARgb32, self.width as i32, self.height as i32)
@@ -73,31 +75,12 @@ impl App {
             cairo::Context::new(&cairo_surface).context("Failed to create Cairo context")?;
 
         // Clear the background (transparent)
-        cairo_ctx.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+        cairo_ctx.set_source_rgba(0., 0., 0., 0.);
         cairo_ctx.set_operator(cairo::Operator::Source);
         cairo_ctx.paint()?;
         cairo_ctx.set_operator(cairo::Operator::Over);
 
-        // Calculate average CPU usage across all cores
-        let cpus = self.system.cpus();
-        let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
-        let cpu_usage = (total_usage / cpus.len() as f32) as f64;
-
-        // CPU usage is already a percentage (0-100), so normalize to 0-1
-        let normalized_load = (cpu_usage / 100.0).min(1.0);
-
         self.draw_main(&cairo_ctx)?;
-
-        // Display the load average below the arc
-        cairo_ctx.set_source_rgba(1.0, 1.0, 1.0, 0.6);
-        cairo_ctx.select_font_face("Inconsolata Nerd Font", FontSlant::Normal, FontWeight::Bold);
-        cairo_ctx.set_font_size(16.0);
-
-        let text = format!("{:.1}%", normalized_load * 100.);
-        let x = self.width as f64 / 2.0;
-        let y = self.height as f64 - 12.;
-        self.text_centered_at(&text, x, y, 16., &cairo_ctx)?;
-        self.text_centered_at(" ", x, y - 24., 32., &cairo_ctx)?;
 
         // Drop the Cairo context to release the surface
         drop(cairo_ctx);
@@ -129,6 +112,7 @@ impl App {
         mmap.copy_from_slice(&data);
 
         // Create shared memory pool
+        let shm = self.shm.as_ref().unwrap();
         let pool = shm.create_pool(
             unsafe { BorrowedFd::borrow_raw(temp_file.as_raw_fd()) },
             size,
@@ -148,6 +132,7 @@ impl App {
         );
 
         // Attach buffer to surface and commit
+        let surface = self.surface.as_ref().unwrap();
         surface.attach(Some(&buffer), 0, 0);
         surface.commit();
 
@@ -155,31 +140,39 @@ impl App {
         Ok(())
     }
 
-    fn draw_main(&self, ctx: &cairo::Context) -> Result<()> {
-        // Draw a circle with radial gradient at the bottom center
-        let circle_radius = 100.0;
-        let circle_center_x = self.width as f64 / 2.0;
-        let circle_center_y = self.height as f64 - 20.0;
+    fn draw_main(&mut self, ctx: &cairo::Context) -> Result<()> {
+        // Calculate average CPU usage across all cores
+        let cpus = self.system.cpus();
+        let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
+        let cpu_usage = (total_usage / cpus.len() as f32).min(100.) as f64;
+        self.cpu_usage_points.push_front(cpu_usage);
+        if self.cpu_usage_points.len() > MAX_CPU_USAGE_POINTS {
+            self.cpu_usage_points.pop_back();
+        }
 
-        // Create radial gradient pattern
+        // Draw a circle with radial gradient at the bottom center
+        let circle_radius = 100.;
+        let circle_center_x = self.width as f64 / 2.;
+        let circle_center_y = self.height as f64 - 20.;
+
         let pattern = cairo::RadialGradient::new(
             circle_center_x,
             circle_center_y,
-            0.0, // Inner circle (center, radius)
+            0., // Inner circle (center, radius)
             circle_center_x,
             circle_center_y,
             circle_radius, // Outer circle (center, radius)
         );
 
-        // Add gradient stops: bright center to transparent edge
         pattern.add_color_stop_rgba(0., 0., 0., 0., 0.);
         pattern.add_color_stop_rgba(0.62, 0., 0., 0., 0.);
-        pattern.add_color_stop_rgba(1., 208. / 255., 143. / 255., 1.0, 0.25);
+        pattern.add_color_stop_rgba(1., 208. / 255., 143. / 255., 1., 0.25);
 
         ctx.set_source(&pattern).context("Error setting pattern")?;
         ctx.arc(circle_center_x, circle_center_y, circle_radius, 0., 2. * PI);
         ctx.fill()?;
 
+        // Draw a border around it
         ctx.set_source_rgba(1., 1., 1., 0.6);
         ctx.set_line_width(2.);
         ctx.arc(
@@ -211,15 +204,42 @@ impl App {
             ctx.stroke()?;
 
             if let Some(cpu2) = cpu_pair.next() {
-                ctx.arc(
+                ctx.arc_negative(
                     circle_center_x,
                     circle_center_y,
                     radius,
-                    top - (cpu2.cpu_usage() as f64) / 100. * PI / 2.,
                     top,
+                    top - (cpu2.cpu_usage() as f64) / 100. * PI / 2.,
                 );
                 ctx.stroke()?;
             }
+        }
+
+        // Display the load average below the arc
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.select_font_face("Inconsolata Nerd Font", FontSlant::Normal, FontWeight::Bold);
+        ctx.set_font_size(16.);
+
+        let text = format!("{:.1}%", cpu_usage);
+        let x = self.width as f64 / 2.;
+        let y = self.height as f64 - 12.;
+        self.text_centered_at(&text, x, y, 16., &ctx)?;
+        self.text_centered_at(" ", x, y - 24., 32., &ctx)?;
+        ctx.new_path();
+
+        let arc_step = PI / MAX_CPU_USAGE_POINTS as f64;
+        for (i, cpu_usage) in self.cpu_usage_points.iter().enumerate() {
+            let line_width = 2.0f64.max(*cpu_usage / 5.);
+            ctx.set_line_width(line_width);
+            ctx.arc_negative(
+                circle_center_x,
+                circle_center_y,
+                circle_radius + 6. + line_width / 2.,
+                -arc_step * i as f64,
+                -arc_step * i as f64 - arc_step,
+            );
+            ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
+            ctx.stroke()?;
         }
 
         Ok(())
