@@ -2,15 +2,16 @@ use std::{
     collections::VecDeque,
     f64::consts::PI,
     os::unix::io::{AsRawFd, BorrowedFd},
+    path::Path,
     thread,
     time::Duration,
 };
 
 use anyhow::{Context as _, Result};
-use cairo::{FontSlant, FontWeight, Format, ImageSurface};
+use cairo::{FontSlant, FontWeight, Format, ImageSurface, LinearGradient};
 use itertools::Itertools as _;
 use log::{error, info};
-use sysinfo::System;
+use sysinfo::{Disk, Disks, System};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
     protocol::{
@@ -21,6 +22,8 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 const MAX_CPU_USAGE_POINTS: usize = 50;
+const GAUGE_UPWARD_SHIFT: f64 = 20.;
+const BAR_LENGTH: f64 = 200.;
 
 struct App {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -32,15 +35,16 @@ struct App {
     width: u32,
     height: u32,
     system: System,
+    disks: Disks,
     cpu_usage_points: VecDeque<f64>,
 }
 
 impl App {
     fn new() -> Self {
-        let mut system = System::new();
-        system.refresh_cpu_all();
+        let system = System::new();
+        let disks = Disks::new_with_refreshed_list();
 
-        App {
+        let mut this = App {
             compositor: None,
             layer_shell: None,
             xdg_wm_base: None,
@@ -50,8 +54,16 @@ impl App {
             width: 0,  // Will be set by layer surface configure event
             height: 0, // Will be set by layer surface configure event
             system,
+            disks,
             cpu_usage_points: Default::default(),
-        }
+        };
+        this.refresh_system();
+        this
+    }
+
+    fn refresh_system(&mut self) {
+        self.system.refresh_cpu_all();
+        self.disks.refresh(true /*remove_not_listed_disks*/);
     }
 
     fn render(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
@@ -65,7 +77,7 @@ impl App {
             return Ok(());
         }
 
-        self.system.refresh_cpu_all();
+        self.refresh_system();
 
         // Create a Cairo surface
         let mut cairo_surface =
@@ -151,17 +163,17 @@ impl App {
         }
 
         // Draw a circle with radial gradient at the bottom center
-        let circle_radius = 100.;
-        let circle_center_x = self.width as f64 / 2.;
-        let circle_center_y = self.height as f64 - 20.;
+        let gauge_radius = 100.;
+        let gauge_center_x = self.width as f64 / 2.;
+        let gauge_center_y = self.height as f64 - GAUGE_UPWARD_SHIFT;
 
         let pattern = cairo::RadialGradient::new(
-            circle_center_x,
-            circle_center_y,
+            gauge_center_x,
+            gauge_center_y,
             0., // Inner circle (center, radius)
-            circle_center_x,
-            circle_center_y,
-            circle_radius, // Outer circle (center, radius)
+            gauge_center_x,
+            gauge_center_y,
+            gauge_radius, // Outer circle (center, radius)
         );
 
         pattern.add_color_stop_rgba(0., 0., 0., 0., 0.);
@@ -169,16 +181,16 @@ impl App {
         pattern.add_color_stop_rgba(1., 208. / 255., 143. / 255., 1., 0.25);
 
         ctx.set_source(&pattern).context("Error setting pattern")?;
-        ctx.arc(circle_center_x, circle_center_y, circle_radius, 0., 2. * PI);
+        ctx.arc(gauge_center_x, gauge_center_y, gauge_radius, 0., 2. * PI);
         ctx.fill()?;
 
         // Draw a border around it
         ctx.set_source_rgba(1., 1., 1., 0.6);
         ctx.set_line_width(2.);
         ctx.arc(
-            circle_center_x,
-            circle_center_y,
-            circle_radius + 4.,
+            gauge_center_x,
+            gauge_center_y,
+            gauge_radius + 4.,
             0.,
             2. * PI,
         );
@@ -193,10 +205,10 @@ impl App {
             let Some(cpu1) = cpu_pair.next() else {
                 continue;
             };
-            let radius = circle_radius - (i as f64) * 4. - 2.;
+            let radius = gauge_radius - (i as f64) * 4. - 2.;
             ctx.arc(
-                circle_center_x,
-                circle_center_y,
+                gauge_center_x,
+                gauge_center_y,
                 radius,
                 top,
                 top + (cpu1.cpu_usage() as f64) / 100. * PI / 2.,
@@ -205,8 +217,8 @@ impl App {
 
             if let Some(cpu2) = cpu_pair.next() {
                 ctx.arc_negative(
-                    circle_center_x,
-                    circle_center_y,
+                    gauge_center_x,
+                    gauge_center_y,
                     radius,
                     top,
                     top - (cpu2.cpu_usage() as f64) / 100. * PI / 2.,
@@ -232,9 +244,9 @@ impl App {
             let line_width = 2.0f64.max(*cpu_usage / 5.);
             ctx.set_line_width(line_width);
             ctx.arc_negative(
-                circle_center_x,
-                circle_center_y,
-                circle_radius + 6. + line_width / 2.,
+                gauge_center_x,
+                gauge_center_y,
+                gauge_radius + 6. + line_width / 2.,
                 -arc_step * i as f64,
                 -arc_step * i as f64 - arc_step,
             );
@@ -242,6 +254,89 @@ impl App {
             ctx.stroke()?;
         }
 
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.set_line_width(1.);
+        self.pill(
+            gauge_center_x + gauge_radius + 20.,
+            gauge_center_y - 2.,
+            BAR_LENGTH,
+            6.,
+            ctx,
+        )?;
+        self.pill(
+            gauge_center_x + gauge_radius + 20.,
+            gauge_center_y + 10.,
+            BAR_LENGTH,
+            6.,
+            ctx,
+        )?;
+
+        let root_partition = self
+            .disks
+            .iter()
+            .find(|disk| disk.mount_point() == Path::new("/"))
+            .expect("must have root partition");
+        let root_partition_used = disk_used_frac(root_partition);
+
+        ctx.set_line_cap(cairo::LineCap::Round);
+        ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
+        ctx.move_to(gauge_center_x + gauge_radius + 20., gauge_center_y + 1.);
+        ctx.rel_line_to(BAR_LENGTH * root_partition_used, 0.);
+        ctx.stroke()?;
+
+        let boot_partition = self
+            .disks
+            .iter()
+            .find(|disk| disk.mount_point() == Path::new("/boot/efi/"))
+            .expect("must have boot partition");
+        let boot_partition_used = disk_used_frac(boot_partition);
+
+        ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
+        ctx.move_to(gauge_center_x + gauge_radius + 20., gauge_center_y + 13.);
+        ctx.rel_line_to(BAR_LENGTH * boot_partition_used, 0.);
+        ctx.stroke()?;
+
+        let rect_origin_x = gauge_center_x + gauge_radius + 240.;
+        let rect_origin_y = gauge_center_y - 7.;
+        let rect_size_x = 15.;
+        let rect_size_y = self.height as f64 - rect_origin_y;
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.move_to(rect_origin_x - 2., rect_origin_y);
+        ctx.rel_line_to(0., rect_size_y);
+        ctx.stroke()?;
+
+        let pattern = LinearGradient::new(
+            rect_origin_x,
+            rect_origin_y,
+            rect_origin_x + rect_size_x,
+            rect_origin_y,
+        );
+        pattern.add_color_stop_rgba(0., 208. / 255., 143. / 255., 1., 0.25);
+        pattern.add_color_stop_rgba(1., 0., 0., 0., 0.);
+        ctx.rectangle(rect_origin_x, rect_origin_y, rect_size_x, rect_size_y);
+        ctx.set_source(pattern)?;
+        ctx.fill()?;
+
+        Ok(())
+    }
+
+    fn pill(
+        &self,
+        origin_x: f64,
+        origin_y: f64,
+        size_x: f64,
+        size_y: f64,
+        ctx: &cairo::Context,
+    ) -> Result<()> {
+        let radius = size_y / 2.;
+        ctx.move_to(origin_x, origin_y);
+        ctx.rel_line_to(size_x, 0.);
+        let (curr_x, curr_y) = ctx.current_point()?;
+        ctx.arc(curr_x, curr_y + radius, radius, 3. * PI / 2., PI / 2.);
+        ctx.rel_line_to(-200., 0.);
+        let (curr_x, curr_y) = ctx.current_point()?;
+        ctx.arc(curr_x, curr_y - radius, radius, PI / 2., 3. * PI / 2.);
+        ctx.stroke()?;
         Ok(())
     }
 
@@ -535,4 +630,8 @@ fn main() -> Result<()> {
     loop {
         event_queue.blocking_dispatch(&mut app)?;
     }
+}
+
+fn disk_used_frac(disk: &Disk) -> f64 {
+    1. - (disk.total_space() - disk.available_space()) as f64 / disk.total_space() as f64
 }
