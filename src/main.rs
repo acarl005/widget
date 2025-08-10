@@ -156,8 +156,8 @@ impl App {
             .context("Failed to get Cairo surface data")?;
 
         // Create a shared memory buffer for Wayland (using physical dimensions)
-        let stride = (physical_width * 4) as i32; // 4 bytes per pixel for ARGB32
-        let size = stride * physical_height as i32;
+        let stride = physical_width * 4; // 4 bytes per pixel for ARGB32
+        let size = stride * physical_height;
 
         // Create a temporary file for shared memory
         let temp_file = tempfile::tempfile().context("Failed to create temp file")?;
@@ -280,8 +280,8 @@ impl App {
         let text = format!("{:.1}%", self.cpu_usage_points.back().unwrap());
         let x = self.width as f64 / 2.;
         let y = self.height as f64 - 12.;
-        self.text_centered_at(&text, x, y, 16., &ctx)?;
-        self.text_centered_at(" ", x, y - 24., 32., &ctx)?;
+        self.text_centered_at(&text, x, y, 16., ctx)?;
+        self.text_centered_at(" ", x, y - 24., 32., ctx)?;
         ctx.new_path();
 
         let arc_step = PI / MAX_CPU_USAGE_POINTS as f64;
@@ -692,20 +692,17 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_callback::Event::Done { .. } => {
-                info!("Frame callback done - triggering render");
-                if let Err(e) = state.render(qhandle) {
-                    error!("Frame callback render error: {}", e);
-                }
-
-                // Schedule next frame callback after a 1-second delay
-                thread::sleep(RENDER_INTERVAL);
-                if let Some(surface) = &state.surface {
-                    let _callback = surface.frame(qhandle, ());
-                }
+        if let wl_callback::Event::Done { .. } = event {
+            info!("Frame callback done - triggering render");
+            if let Err(e) = state.render(qhandle) {
+                error!("Frame callback render error: {}", e);
             }
-            _ => {}
+
+            // Schedule next frame callback after a 1-second delay
+            thread::sleep(RENDER_INTERVAL);
+            if let Some(surface) = &state.surface {
+                let _callback = surface.frame(qhandle, ());
+            }
         }
     }
 }
@@ -745,12 +742,9 @@ impl Dispatch<wl_output::WlOutput, ()> for App {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_output::Event::Scale { factor } => {
-                info!("Output scale factor: {}", factor);
-                state.scale_factor = factor;
-            }
-            _ => {}
+        if let wl_output::Event::Scale { factor } = event {
+            info!("Output scale factor: {}", factor);
+            state.scale_factor = factor;
         }
     }
 }
@@ -859,7 +853,7 @@ fn format_bytes(bytes: u64) -> String {
     if bytes < 1000 {
         return format!("{bytes}B");
     }
-    const UNITS: [&'static str; 5] = ["kB", "MB", "GB", "TB", "PB"];
+    const UNITS: [&str; 5] = ["kB", "MB", "GB", "TB", "PB"];
     let mut val = bytes as f64;
     for unit in UNITS {
         val /= 1024.;
