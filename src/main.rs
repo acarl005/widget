@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use cairo::{FontSlant, FontWeight, Format, ImageSurface, LinearGradient};
 use itertools::Itertools as _;
 use log::{debug, error, info};
-use sysinfo::{Disk, Disks, System};
+use sysinfo::{Disk, Disks, Networks, System};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
     protocol::{
@@ -25,13 +25,13 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 const RENDER_INTERVAL: Duration = Duration::from_millis(100);
 // const RENDER_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CPU_USAGE_POINTS: usize = 50;
-const MAX_DISK_USAGE_POINTS: usize = 150;
 const GAUGE_UPWARD_SHIFT: f64 = 20.;
 const PILL_MARGIN: f64 = 20.;
 const PILL_LENGTH: f64 = 175.;
+const MAX_GRAPH_POINTS: usize = 150;
 const GRAPH_LENGTH: f64 = 175.;
 const GRAPH_HEIGHT: f64 = 30.;
-const GRAPH_BAR_WIDTH: f64 = GRAPH_LENGTH / MAX_DISK_USAGE_POINTS as f64;
+const GRAPH_BAR_WIDTH: f64 = GRAPH_LENGTH / MAX_GRAPH_POINTS as f64;
 
 struct BufferResources {
     pool: wl_shm_pool::WlShmPool,
@@ -58,15 +58,19 @@ struct App {
     scale_factor: i32,
     system: System,
     disks: Disks,
+    networks: Networks,
     cpu_usage_points: VecDeque<f64>,
     read_bytes_points: VecDeque<u64>,
     written_bytes_points: VecDeque<u64>,
+    downloaded_bytes_points: VecDeque<u64>,
+    uploaded_bytes_points: VecDeque<u64>,
 }
 
 impl App {
     fn new() -> Self {
         let system = System::new();
-        let disks = Disks::new_with_refreshed_list();
+        let disks = Disks::new();
+        let networks = Networks::new();
 
         let mut this = App {
             compositor: None,
@@ -82,9 +86,12 @@ impl App {
             scale_factor: 1, // Will be updated from output events
             system,
             disks,
+            networks,
             cpu_usage_points: Default::default(),
             read_bytes_points: Default::default(),
             written_bytes_points: Default::default(),
+            downloaded_bytes_points: Default::default(),
+            uploaded_bytes_points: Default::default(),
         };
         this.refresh_system();
         this
@@ -94,6 +101,7 @@ impl App {
         self.system.refresh_cpu_all();
         self.system.refresh_memory();
         self.disks.refresh(true /*remove_not_listed_disks*/);
+        self.networks.refresh(true /*remove_not_listed_interfaces*/);
 
         // Calculate average CPU usage across all cores
         let cpus = self.system.cpus();
@@ -109,11 +117,7 @@ impl App {
             .iter()
             .map(|disk| disk.usage().read_bytes)
             .sum::<u64>();
-        push_within_limit(
-            &mut self.read_bytes_points,
-            read_bytes,
-            MAX_DISK_USAGE_POINTS,
-        );
+        push_within_limit(&mut self.read_bytes_points, read_bytes, MAX_GRAPH_POINTS);
 
         let written_bytes = self
             .disks
@@ -123,7 +127,29 @@ impl App {
         push_within_limit(
             &mut self.written_bytes_points,
             written_bytes,
-            MAX_DISK_USAGE_POINTS,
+            MAX_GRAPH_POINTS,
+        );
+
+        let downloaded_bytes = self
+            .networks
+            .iter()
+            .map(|(_if_name, network)| network.received())
+            .sum::<u64>();
+        push_within_limit(
+            &mut self.downloaded_bytes_points,
+            downloaded_bytes,
+            MAX_GRAPH_POINTS,
+        );
+
+        let uploaded_bytes = self
+            .networks
+            .iter()
+            .map(|(_if_name, network)| network.transmitted())
+            .sum::<u64>();
+        push_within_limit(
+            &mut self.uploaded_bytes_points,
+            uploaded_bytes,
+            MAX_GRAPH_POINTS,
         );
     }
 
@@ -446,22 +472,12 @@ impl App {
         ctx.move_to(text_x + 100., rect_origin_y + 10.);
         ctx.show_text(&format!(
             "  {}",
-            format_bytes(
-                self.disks
-                    .iter()
-                    .map(|disk| disk.usage().read_bytes)
-                    .sum::<u64>(),
-            )
+            format_bytes(*self.read_bytes_points.back().unwrap())
         ))?;
         ctx.move_to(text_x + 100., rect_origin_y + 22.);
         ctx.show_text(&format!(
             "  {}",
-            format_bytes(
-                self.disks
-                    .iter()
-                    .map(|disk| disk.usage().written_bytes)
-                    .sum::<u64>(),
-            )
+            format_bytes(*self.written_bytes_points.back().unwrap())
         ))?;
 
         let rect_origin_x = text_x + 150.;
@@ -566,6 +582,70 @@ impl App {
         ctx.rectangle(rect_origin_x, rect_origin_y, rect_size_x, rect_size_y);
         ctx.set_source(pattern)?;
         ctx.fill()?;
+
+        let text_x = rect_origin_x + 5.;
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.set_font_size(32.);
+        let text = " ";
+        ctx.move_to(
+            text_x - ctx.text_extents(text)?.width(),
+            rect_origin_y - 12.,
+        );
+        ctx.show_text(text)?;
+
+        ctx.set_font_size(10.);
+        let text = format!(
+            "SWAP {:5.1}%",
+            100. * self.system.used_swap() as f64 / self.system.total_swap() as f64
+        );
+        ctx.move_to(
+            text_x - ctx.text_extents(&text)?.width(),
+            rect_origin_y + 10.,
+        );
+        ctx.show_text(&text)?;
+        let text = format!(
+            "MEM  {:5.1}%",
+            100. * self.system.used_memory() as f64 / self.system.total_memory() as f64
+        );
+        ctx.move_to(
+            text_x - ctx.text_extents(&text)?.width(),
+            rect_origin_y + 22.,
+        );
+        ctx.show_text(&text)?;
+
+        ctx.set_font_size(32.);
+        ctx.move_to(text_x - 155., rect_origin_y - 12.);
+        ctx.show_text("󰀂 ")?;
+
+        ctx.set_font_size(10.);
+        ctx.move_to(text_x - 155., rect_origin_y + 10.);
+        ctx.show_text(&format!(
+            "  {}",
+            format_bytes(*self.uploaded_bytes_points.back().unwrap())
+        ))?;
+        ctx.move_to(text_x - 155., rect_origin_y + 22.);
+        ctx.show_text(&format!(
+            "  {}",
+            format_bytes(*self.downloaded_bytes_points.back().unwrap())
+        ))?;
+
+        let rect_origin_x = text_x - 150. - rect_size_x;
+        let pattern = LinearGradient::new(
+            rect_origin_x,
+            rect_origin_y,
+            rect_origin_x + rect_size_x,
+            rect_origin_y,
+        );
+        pattern.add_color_stop_rgba(0., 208. / 255., 143. / 255., 1., 0.25);
+        pattern.add_color_stop_rgba(1., 0., 0., 0., 0.);
+        ctx.rectangle(rect_origin_x, rect_origin_y, rect_size_x, rect_size_y);
+        ctx.set_source(pattern)?;
+        ctx.fill()?;
+
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.move_to(rect_origin_x - 2., rect_origin_y);
+        ctx.rel_line_to(0., rect_size_y);
+        ctx.stroke()?;
 
         Ok(())
     }
@@ -919,20 +999,20 @@ fn format_bytes(bytes: u64) -> String {
     format!("{val:.1}PB")
 }
 
-fn push_within_limit<T>(values: &mut VecDeque<T>, new_value: T, limit: usize) -> Option<T> {
+fn push_within_limit<T>(values: &mut VecDeque<T>, new_value: T, limit: usize) {
     values.push_front(new_value);
-    if values.len() > limit {
-        values.pop_back()
-    } else {
-        None
+
+    while values.len() > limit {
+        values.pop_back();
     }
 }
 
+#[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_format_bytes() {
-        use super::format_bytes;
-
         assert_eq!(format_bytes(0), "0B");
         assert_eq!(format_bytes(43), "43B");
         assert_eq!(format_bytes(999), "999B");
@@ -944,5 +1024,17 @@ mod tests {
         assert_eq!(format_bytes(702227152896), "654.0GB");
         assert_eq!(format_bytes(1039475162591213420), "923.2PB");
         assert_eq!(format_bytes(1503947516259121342), "1335.8PB");
+    }
+
+    #[test]
+    fn test_push_within_limit() {
+        let mut nums: VecDeque<i32> = Default::default();
+        push_within_limit(&mut nums, 5, 3);
+        assert_eq!(nums.iter().collect_vec(), vec![&5]);
+        push_within_limit(&mut nums, 6, 3);
+        push_within_limit(&mut nums, 7, 3);
+        assert_eq!(nums.iter().collect_vec(), vec![&7, &6, &5]);
+        push_within_limit(&mut nums, 8, 3);
+        assert_eq!(nums.iter().collect_vec(), vec![&8, &7, &6]);
     }
 }
