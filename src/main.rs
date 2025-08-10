@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use cairo::{FontSlant, FontWeight, Format, ImageSurface, LinearGradient};
 use itertools::Itertools as _;
-use log::{error, info};
+use log::{debug, error, info};
 use sysinfo::{Disk, Disks, System};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
@@ -38,6 +38,10 @@ struct App {
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     xdg_wm_base: Option<xdg_wm_base::XdgWmBase>,
     shm: Option<wl_shm::WlShm>,
+    buffer_pool: Option<wl_shm_pool::WlShmPool>,
+    buffer_file: Option<tempfile::NamedTempFile>,
+    buffer_mmap: Option<memmap2::MmapMut>,
+    buffer_size: usize,
     surface: Option<wl_surface::WlSurface>,
     layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
     outputs: Vec<wl_output::WlOutput>,
@@ -61,6 +65,10 @@ impl App {
             layer_shell: None,
             xdg_wm_base: None,
             shm: None,
+            buffer_pool: None,
+            buffer_file: None,
+            buffer_mmap: None,
+            buffer_size: 0,
             surface: None,
             layer_surface: None,
             outputs: Vec::new(),
@@ -157,33 +165,67 @@ impl App {
 
         // Create a shared memory buffer for Wayland (using physical dimensions)
         let stride = physical_width * 4; // 4 bytes per pixel for ARGB32
-        let size = stride * physical_height;
+        let size = (stride * physical_height) as usize;
 
-        // Create a temporary file for shared memory
-        let temp_file = tempfile::tempfile().context("Failed to create temp file")?;
-        temp_file
-            .set_len(size as u64)
-            .context("Failed to set file size")?;
+        debug!(
+            "Buffer calculation: stride={}, size={}, data.len()={}",
+            stride,
+            size,
+            data.len()
+        );
 
-        // Map the file into memory
-        let mut mmap = unsafe {
-            memmap2::MmapOptions::new()
-                .len(size as usize)
-                .map_mut(&temp_file)
-                .context("Failed to mmap file")?
-        };
+        // Check if we need to create new buffer or can reuse existing one
+        if self.buffer_size != size || self.buffer_file.is_none() {
+            info!(
+                "Creating new buffer: old_size={}, new_size={}",
+                self.buffer_size, size
+            );
+
+            // Create a new temporary file for shared memory
+            let mut temp_file =
+                tempfile::NamedTempFile::new().context("Failed to create temp file")?;
+            temp_file
+                .as_file_mut()
+                .set_len(size as u64)
+                .context("Failed to set file size")?;
+
+            // Map the file into memory
+            let mmap = unsafe {
+                memmap2::MmapOptions::new()
+                    .len(size)
+                    .map_mut(temp_file.as_file())
+                    .context("Failed to mmap file")?
+            };
+
+            // Create shared memory pool
+            let shm = self.shm.as_ref().unwrap();
+            let pool = shm.create_pool(
+                unsafe { BorrowedFd::borrow_raw(temp_file.as_file().as_raw_fd()) },
+                size as i32,
+                qhandle,
+                (),
+            );
+
+            // Store for reuse
+            self.buffer_file = Some(temp_file);
+            self.buffer_mmap = Some(mmap);
+            self.buffer_pool = Some(pool);
+            self.buffer_size = size;
+        }
+
+        let mmap = self.buffer_mmap.as_mut().unwrap();
+
+        debug!(
+            "About to copy {} bytes from Cairo surface data to mmap of len {}",
+            data.len(),
+            mmap.len()
+        );
 
         // Copy Cairo surface data to shared memory
         mmap.copy_from_slice(&data);
 
-        // Create shared memory pool
-        let shm = self.shm.as_ref().unwrap();
-        let pool = shm.create_pool(
-            unsafe { BorrowedFd::borrow_raw(temp_file.as_raw_fd()) },
-            size,
-            qhandle,
-            (),
-        );
+        // Get the pool reference
+        let pool = self.buffer_pool.as_ref().unwrap();
 
         // Create buffer from the pool (using physical dimensions)
         let buffer = pool.create_buffer(
@@ -202,7 +244,7 @@ impl App {
         surface.attach(Some(&buffer), 0, 0);
         surface.commit();
 
-        info!("Render completed successfully");
+        debug!("Render completed successfully");
         Ok(())
     }
 
@@ -693,7 +735,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
         qhandle: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { .. } = event {
-            info!("Frame callback done - triggering render");
+            debug!("Frame callback done - triggering render");
             if let Err(e) = state.render(qhandle) {
                 error!("Frame callback render error: {}", e);
             }
