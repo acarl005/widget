@@ -84,6 +84,9 @@ impl App {
 
         // Calculate average CPU usage across all cores
         let cpus = self.system.cpus();
+        if cpus.is_empty() {
+            panic!("CPUs cannot be empty");
+        }
         let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
         let cpu_usage = (total_usage / cpus.len() as f32).min(100.) as f64;
         push_within_limit(&mut self.cpu_usage_points, cpu_usage, MAX_CPU_USAGE_POINTS);
@@ -321,7 +324,7 @@ impl App {
         let root_partition_used = disk_used_frac(root_partition);
 
         ctx.set_line_cap(cairo::LineCap::Round);
-        ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
+        ctx.set_source_rgb(94. / 255., 1., 108. / 255.);
         ctx.move_to(
             gauge_center_x + gauge_radius + PILL_MARGIN,
             gauge_center_y + 1.,
@@ -437,7 +440,7 @@ impl App {
             ctx.fill()?;
         }
 
-        ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
+        ctx.set_source_rgb(94. / 255., 1., 108. / 255.);
         let written_bytes_max_val =
             1.0f64.max(*self.written_bytes_points.iter().max().unwrap() as f64);
         for (i, written_bytes_point) in self.written_bytes_points.iter().enumerate() {
@@ -470,7 +473,7 @@ impl App {
 
         let frac_swap_used = self.system.used_swap() as f64 / self.system.total_swap() as f64;
         ctx.set_line_cap(cairo::LineCap::Round);
-        ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
+        ctx.set_source_rgb(94. / 255., 1., 108. / 255.);
         ctx.move_to(
             gauge_center_x - gauge_radius - PILL_MARGIN,
             gauge_center_y + 1.,
