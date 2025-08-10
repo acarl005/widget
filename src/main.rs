@@ -33,15 +33,23 @@ const GRAPH_LENGTH: f64 = 175.;
 const GRAPH_HEIGHT: f64 = 30.;
 const GRAPH_BAR_WIDTH: f64 = GRAPH_LENGTH / MAX_DISK_USAGE_POINTS as f64;
 
+struct BufferResources {
+    pool: wl_shm_pool::WlShmPool,
+    #[allow(
+        dead_code,
+        reason = "Need to prevent Drop so the file doesn't get deleted."
+    )]
+    file: tempfile::NamedTempFile,
+    mmap: memmap2::MmapMut,
+    size: usize,
+}
+
 struct App {
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     xdg_wm_base: Option<xdg_wm_base::XdgWmBase>,
     shm: Option<wl_shm::WlShm>,
-    buffer_pool: Option<wl_shm_pool::WlShmPool>,
-    buffer_file: Option<tempfile::NamedTempFile>,
-    buffer_mmap: Option<memmap2::MmapMut>,
-    buffer_size: usize,
+    buffer_resources: Option<BufferResources>,
     surface: Option<wl_surface::WlSurface>,
     layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
     outputs: Vec<wl_output::WlOutput>,
@@ -65,10 +73,7 @@ impl App {
             layer_shell: None,
             xdg_wm_base: None,
             shm: None,
-            buffer_pool: None,
-            buffer_file: None,
-            buffer_mmap: None,
-            buffer_size: 0,
+            buffer_resources: None,
             surface: None,
             layer_surface: None,
             outputs: Vec::new(),
@@ -175,10 +180,15 @@ impl App {
         );
 
         // Check if we need to create new buffer or can reuse existing one
-        if self.buffer_size != size || self.buffer_file.is_none() {
+        if self
+            .buffer_resources
+            .as_ref()
+            .map_or(true, |b| b.size != size)
+        {
+            let old_size = self.buffer_resources.as_ref().map_or(0, |b| b.size);
             info!(
                 "Creating new buffer: old_size={}, new_size={}",
-                self.buffer_size, size
+                old_size, size
             );
 
             // Create a new temporary file for shared memory
@@ -207,13 +217,16 @@ impl App {
             );
 
             // Store for reuse
-            self.buffer_file = Some(temp_file);
-            self.buffer_mmap = Some(mmap);
-            self.buffer_pool = Some(pool);
-            self.buffer_size = size;
+            self.buffer_resources = Some(BufferResources {
+                pool,
+                file: temp_file,
+                mmap,
+                size,
+            });
         }
 
-        let mmap = self.buffer_mmap.as_mut().unwrap();
+        let buffer_resources = self.buffer_resources.as_mut().unwrap();
+        let mmap = &mut buffer_resources.mmap;
 
         debug!(
             "About to copy {} bytes from Cairo surface data to mmap of len {}",
@@ -225,7 +238,7 @@ impl App {
         mmap.copy_from_slice(&data);
 
         // Get the pool reference
-        let pool = self.buffer_pool.as_ref().unwrap();
+        let pool = &buffer_resources.pool;
 
         // Create buffer from the pool (using physical dimensions)
         let buffer = pool.create_buffer(
