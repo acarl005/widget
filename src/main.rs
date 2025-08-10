@@ -252,7 +252,7 @@ impl App {
 
         let arc_step = PI / MAX_CPU_USAGE_POINTS as f64;
         for (i, cpu_usage) in self.cpu_usage_points.iter().enumerate() {
-            let line_width = 2.0f64.max(*cpu_usage / 5.);
+            let line_width = *cpu_usage / 5.;
             ctx.set_line_width(line_width);
             ctx.arc_negative(
                 gauge_center_x,
@@ -327,6 +327,47 @@ impl App {
         ctx.rectangle(rect_origin_x, rect_origin_y, rect_size_x, rect_size_y);
         ctx.set_source(pattern)?;
         ctx.fill()?;
+
+        let text_x = rect_origin_x + 10.;
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.set_font_size(32.);
+        ctx.move_to(text_x, rect_origin_y - 12.);
+        ctx.show_text("󰋊 ")?;
+
+        ctx.set_font_size(10.);
+        ctx.move_to(text_x, rect_origin_y + 10.);
+        ctx.show_text(&format!(
+            "{:.1}% {}",
+            root_partition_used * 100.,
+            root_partition.mount_point().display()
+        ))?;
+        ctx.move_to(text_x, rect_origin_y + 22.);
+        ctx.show_text(&format!(
+            "{:.1}% {}",
+            boot_partition_used * 100.,
+            boot_partition.mount_point().display()
+        ))?;
+
+        ctx.move_to(text_x + 100., rect_origin_y + 10.);
+        ctx.show_text(&format!(
+            "  {}",
+            format_bytes(
+                self.disks
+                    .iter()
+                    .map(|disk| disk.usage().read_bytes)
+                    .sum::<u64>(),
+            )
+        ))?;
+        ctx.move_to(text_x + 100., rect_origin_y + 22.);
+        ctx.show_text(&format!(
+            "  {}",
+            format_bytes(
+                self.disks
+                    .iter()
+                    .map(|disk| disk.usage().written_bytes)
+                    .sum::<u64>(),
+            )
+        ))?;
 
         Ok(())
     }
@@ -669,4 +710,38 @@ fn main() -> Result<()> {
 
 fn disk_used_frac(disk: &Disk) -> f64 {
     1. - (disk.total_space() - disk.available_space()) as f64 / disk.total_space() as f64
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1000 {
+        return format!("{bytes}B");
+    }
+    const UNITS: [&'static str; 5] = ["kB", "MB", "GB", "TB", "PB"];
+    let mut val = bytes as f64;
+    for unit in UNITS {
+        val /= 1024.;
+        if val < 1000. {
+            return format!("{val:.1}{unit}");
+        }
+    }
+    format!("{val:.1}PB")
+}
+
+mod tests {
+    use super::format_bytes;
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(43), "43B");
+        assert_eq!(format_bytes(999), "999B");
+        assert_eq!(format_bytes(1000), "1.0kB");
+        assert_eq!(format_bytes(1076), "1.1kB");
+        assert_eq!(format_bytes(1048574), "1.0MB");
+        assert_eq!(format_bytes(1048578), "1.0MB");
+        assert_eq!(format_bytes(16043212), "15.3MB");
+        assert_eq!(format_bytes(702227152896), "654.0GB");
+        assert_eq!(format_bytes(1039475162591213420), "923.2PB");
+        assert_eq!(format_bytes(1503947516259121342), "1335.8PB");
+    }
 }
