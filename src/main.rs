@@ -79,6 +79,7 @@ impl App {
 
     fn refresh_system(&mut self) {
         self.system.refresh_cpu_all();
+        self.system.refresh_memory();
         self.disks.refresh(true /*remove_not_listed_disks*/);
 
         // Calculate average CPU usage across all cores
@@ -138,10 +139,10 @@ impl App {
         // Clear the background (transparent)
         cairo_ctx.set_source_rgba(0., 0., 0., 0.);
         cairo_ctx.set_operator(cairo::Operator::Source);
-        cairo_ctx.paint()?;
+        cairo_ctx.paint().context("Failed to paint")?;
         cairo_ctx.set_operator(cairo::Operator::Over);
 
-        self.draw_main(&cairo_ctx)?;
+        self.draw_main(&cairo_ctx).context("Error in draw_main")?;
 
         // Drop the Cairo context to release the surface
         drop(cairo_ctx);
@@ -321,7 +322,10 @@ impl App {
 
         ctx.set_line_cap(cairo::LineCap::Round);
         ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
-        ctx.move_to(gauge_center_x + gauge_radius + 20., gauge_center_y + 1.);
+        ctx.move_to(
+            gauge_center_x + gauge_radius + PILL_MARGIN,
+            gauge_center_y + 1.,
+        );
         ctx.rel_line_to(PILL_LENGTH * root_partition_used, 0.);
         ctx.stroke()?;
 
@@ -333,7 +337,10 @@ impl App {
         let boot_partition_used = disk_used_frac(boot_partition);
 
         ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
-        ctx.move_to(gauge_center_x + gauge_radius + 20., gauge_center_y + 13.);
+        ctx.move_to(
+            gauge_center_x + gauge_radius + PILL_MARGIN,
+            gauge_center_y + 13.,
+        );
         ctx.rel_line_to(PILL_LENGTH * boot_partition_used, 0.);
         ctx.stroke()?;
 
@@ -443,6 +450,64 @@ impl App {
             );
             ctx.fill()?;
         }
+
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.set_line_width(1.);
+        self.pill(
+            gauge_center_x - gauge_radius - PILL_MARGIN - PILL_LENGTH,
+            gauge_center_y - 2.,
+            PILL_LENGTH,
+            6.,
+            ctx,
+        )?;
+        self.pill(
+            gauge_center_x - gauge_radius - PILL_MARGIN - PILL_LENGTH,
+            gauge_center_y + 10.,
+            PILL_LENGTH,
+            6.,
+            ctx,
+        )?;
+
+        let frac_swap_used = self.system.used_swap() as f64 / self.system.total_swap() as f64;
+        ctx.set_line_cap(cairo::LineCap::Round);
+        ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
+        ctx.move_to(
+            gauge_center_x - gauge_radius - PILL_MARGIN,
+            gauge_center_y + 1.,
+        );
+        ctx.rel_line_to(-PILL_LENGTH * frac_swap_used, 0.);
+        ctx.stroke()?;
+
+        let frac_mem_used = self.system.used_memory() as f64 / self.system.total_memory() as f64;
+        ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
+        ctx.move_to(
+            gauge_center_x - gauge_radius - PILL_MARGIN,
+            gauge_center_y + 13.,
+        );
+        ctx.rel_line_to(-PILL_LENGTH * frac_mem_used, 0.);
+        ctx.stroke()?;
+
+        let rect_size_x = 15.;
+        let rect_origin_y = gauge_center_y - 7.;
+        let rect_size_y = self.height as f64 - rect_origin_y;
+        let rect_origin_x =
+            gauge_center_x - gauge_radius - PILL_LENGTH - PILL_MARGIN * 2. - rect_size_x;
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.move_to(rect_origin_x + rect_size_x + 2., rect_origin_y);
+        ctx.rel_line_to(0., rect_size_y);
+        ctx.stroke()?;
+
+        let pattern = LinearGradient::new(
+            rect_origin_x,
+            rect_origin_y,
+            rect_origin_x + rect_size_x,
+            rect_origin_y,
+        );
+        pattern.add_color_stop_rgba(0., 0., 0., 0., 0.);
+        pattern.add_color_stop_rgba(1., 208. / 255., 143. / 255., 1., 0.25);
+        ctx.rectangle(rect_origin_x, rect_origin_y, rect_size_x, rect_size_y);
+        ctx.set_source(pattern)?;
+        ctx.fill()?;
 
         Ok(())
     }
@@ -812,10 +877,10 @@ fn push_within_limit<T>(values: &mut VecDeque<T>, new_value: T, limit: usize) ->
 }
 
 mod tests {
-    use super::format_bytes;
-
     #[test]
     fn test_format_bytes() {
+        use super::format_bytes;
+
         assert_eq!(format_bytes(0), "0B");
         assert_eq!(format_bytes(43), "43B");
         assert_eq!(format_bytes(999), "999B");
