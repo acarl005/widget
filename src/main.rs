@@ -22,9 +22,16 @@ use wayland_client::{
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
+const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+// const RENDER_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CPU_USAGE_POINTS: usize = 50;
+const MAX_DISK_USAGE_POINTS: usize = 150;
 const GAUGE_UPWARD_SHIFT: f64 = 20.;
-const BAR_LENGTH: f64 = 200.;
+const PILL_MARGIN: f64 = 20.;
+const PILL_LENGTH: f64 = 175.;
+const GRAPH_LENGTH: f64 = 175.;
+const GRAPH_HEIGHT: f64 = 30.;
+const GRAPH_BAR_WIDTH: f64 = GRAPH_LENGTH / MAX_DISK_USAGE_POINTS as f64;
 
 struct App {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -40,6 +47,8 @@ struct App {
     system: System,
     disks: Disks,
     cpu_usage_points: VecDeque<f64>,
+    read_bytes_points: VecDeque<u64>,
+    written_bytes_points: VecDeque<u64>,
 }
 
 impl App {
@@ -61,6 +70,8 @@ impl App {
             system,
             disks,
             cpu_usage_points: Default::default(),
+            read_bytes_points: Default::default(),
+            written_bytes_points: Default::default(),
         };
         this.refresh_system();
         this
@@ -69,6 +80,34 @@ impl App {
     fn refresh_system(&mut self) {
         self.system.refresh_cpu_all();
         self.disks.refresh(true /*remove_not_listed_disks*/);
+
+        // Calculate average CPU usage across all cores
+        let cpus = self.system.cpus();
+        let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
+        let cpu_usage = (total_usage / cpus.len() as f32).min(100.) as f64;
+        push_within_limit(&mut self.cpu_usage_points, cpu_usage, MAX_CPU_USAGE_POINTS);
+
+        let read_bytes = self
+            .disks
+            .iter()
+            .map(|disk| disk.usage().read_bytes)
+            .sum::<u64>();
+        push_within_limit(
+            &mut self.read_bytes_points,
+            read_bytes,
+            MAX_DISK_USAGE_POINTS,
+        );
+
+        let written_bytes = self
+            .disks
+            .iter()
+            .map(|disk| disk.usage().written_bytes)
+            .sum::<u64>();
+        push_within_limit(
+            &mut self.written_bytes_points,
+            written_bytes,
+            MAX_DISK_USAGE_POINTS,
+        );
     }
 
     fn render(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
@@ -164,15 +203,6 @@ impl App {
     }
 
     fn draw_main(&mut self, ctx: &cairo::Context) -> Result<()> {
-        // Calculate average CPU usage across all cores
-        let cpus = self.system.cpus();
-        let total_usage: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
-        let cpu_usage = (total_usage / cpus.len() as f32).min(100.) as f64;
-        self.cpu_usage_points.push_front(cpu_usage);
-        if self.cpu_usage_points.len() > MAX_CPU_USAGE_POINTS {
-            self.cpu_usage_points.pop_back();
-        }
-
         // Draw a circle with radial gradient at the bottom center
         let gauge_radius = 100.;
         let gauge_center_x = self.width as f64 / 2.;
@@ -243,7 +273,7 @@ impl App {
         ctx.select_font_face("Inconsolata Nerd Font", FontSlant::Normal, FontWeight::Bold);
         ctx.set_font_size(16.);
 
-        let text = format!("{:.1}%", cpu_usage);
+        let text = format!("{:.1}%", self.cpu_usage_points.back().unwrap());
         let x = self.width as f64 / 2.;
         let y = self.height as f64 - 12.;
         self.text_centered_at(&text, x, y, 16., &ctx)?;
@@ -268,16 +298,16 @@ impl App {
         ctx.set_source_rgba(1., 1., 1., 0.6);
         ctx.set_line_width(1.);
         self.pill(
-            gauge_center_x + gauge_radius + 20.,
+            gauge_center_x + gauge_radius + PILL_MARGIN,
             gauge_center_y - 2.,
-            BAR_LENGTH,
+            PILL_LENGTH,
             6.,
             ctx,
         )?;
         self.pill(
-            gauge_center_x + gauge_radius + 20.,
+            gauge_center_x + gauge_radius + PILL_MARGIN,
             gauge_center_y + 10.,
-            BAR_LENGTH,
+            PILL_LENGTH,
             6.,
             ctx,
         )?;
@@ -292,7 +322,7 @@ impl App {
         ctx.set_line_cap(cairo::LineCap::Round);
         ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
         ctx.move_to(gauge_center_x + gauge_radius + 20., gauge_center_y + 1.);
-        ctx.rel_line_to(BAR_LENGTH * root_partition_used, 0.);
+        ctx.rel_line_to(PILL_LENGTH * root_partition_used, 0.);
         ctx.stroke()?;
 
         let boot_partition = self
@@ -304,10 +334,10 @@ impl App {
 
         ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
         ctx.move_to(gauge_center_x + gauge_radius + 20., gauge_center_y + 13.);
-        ctx.rel_line_to(BAR_LENGTH * boot_partition_used, 0.);
+        ctx.rel_line_to(PILL_LENGTH * boot_partition_used, 0.);
         ctx.stroke()?;
 
-        let rect_origin_x = gauge_center_x + gauge_radius + 240.;
+        let rect_origin_x = gauge_center_x + gauge_radius + PILL_LENGTH + PILL_MARGIN * 2.;
         let rect_origin_y = gauge_center_y - 7.;
         let rect_size_x = 15.;
         let rect_size_y = self.height as f64 - rect_origin_y;
@@ -369,6 +399,51 @@ impl App {
             )
         ))?;
 
+        let rect_origin_x = text_x + 150.;
+        let pattern = LinearGradient::new(
+            rect_origin_x,
+            rect_origin_y,
+            rect_origin_x + rect_size_x,
+            rect_origin_y,
+        );
+        pattern.add_color_stop_rgba(0., 0., 0., 0., 0.);
+        pattern.add_color_stop_rgba(1., 208. / 255., 143. / 255., 1., 0.25);
+        ctx.rectangle(rect_origin_x, rect_origin_y, rect_size_x, rect_size_y);
+        ctx.set_source(pattern)?;
+        ctx.fill()?;
+
+        ctx.set_source_rgba(1., 1., 1., 0.6);
+        ctx.move_to(rect_origin_x + rect_size_x + 2., rect_origin_y);
+        ctx.rel_line_to(0., rect_size_y);
+        ctx.stroke()?;
+
+        ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
+        let read_bytes_max_val = 1.0f64.max(*self.read_bytes_points.iter().max().unwrap() as f64);
+        for (i, read_bytes_point) in self.read_bytes_points.iter().enumerate() {
+            let rect_height = *read_bytes_point as f64 / read_bytes_max_val * GRAPH_HEIGHT;
+            ctx.rectangle(
+                rect_origin_x + rect_size_x + 3. + GRAPH_LENGTH - i as f64 * GRAPH_BAR_WIDTH,
+                self.height as f64 - rect_height,
+                GRAPH_BAR_WIDTH,
+                rect_height,
+            );
+            ctx.fill()?;
+        }
+
+        ctx.set_source_rgb(94. / 255., 255. / 255., 108. / 255.);
+        let written_bytes_max_val =
+            1.0f64.max(*self.written_bytes_points.iter().max().unwrap() as f64);
+        for (i, written_bytes_point) in self.written_bytes_points.iter().enumerate() {
+            let rect_height = *written_bytes_point as f64 / written_bytes_max_val * GRAPH_HEIGHT;
+            ctx.rectangle(
+                rect_origin_x + rect_size_x + 3. + GRAPH_LENGTH - i as f64 * GRAPH_BAR_WIDTH,
+                self.height as f64 - rect_height,
+                GRAPH_BAR_WIDTH,
+                rect_height,
+            );
+            ctx.fill()?;
+        }
+
         Ok(())
     }
 
@@ -385,7 +460,7 @@ impl App {
         ctx.rel_line_to(size_x, 0.);
         let (curr_x, curr_y) = ctx.current_point()?;
         ctx.arc(curr_x, curr_y + radius, radius, 3. * PI / 2., PI / 2.);
-        ctx.rel_line_to(-200., 0.);
+        ctx.rel_line_to(-PILL_LENGTH, 0.);
         let (curr_x, curr_y) = ctx.current_point()?;
         ctx.arc(curr_x, curr_y - radius, radius, PI / 2., 3. * PI / 2.);
         ctx.stroke()?;
@@ -557,7 +632,7 @@ impl Dispatch<wl_callback::WlCallback, ()> for App {
                 }
 
                 // Schedule next frame callback after a 1-second delay
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(RENDER_INTERVAL);
                 if let Some(surface) = &state.surface {
                     let _callback = surface.frame(qhandle, ());
                 }
@@ -725,6 +800,15 @@ fn format_bytes(bytes: u64) -> String {
         }
     }
     format!("{val:.1}PB")
+}
+
+fn push_within_limit<T>(values: &mut VecDeque<T>, new_value: T, limit: usize) -> Option<T> {
+    values.push_front(new_value);
+    if values.len() > limit {
+        values.pop_back()
+    } else {
+        None
+    }
 }
 
 mod tests {
