@@ -22,8 +22,8 @@ use wayland_client::{
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
-const RENDER_INTERVAL: Duration = Duration::from_millis(100);
-// const RENDER_INTERVAL: Duration = Duration::from_secs(1);
+// const RENDER_INTERVAL: Duration = Duration::from_millis(100);
+const RENDER_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CPU_USAGE_POINTS: usize = 50;
 const GAUGE_UPWARD_SHIFT: f64 = 20.;
 const PILL_MARGIN: f64 = 20.;
@@ -358,7 +358,7 @@ impl App {
         ctx.select_font_face("Inconsolata Nerd Font", FontSlant::Normal, FontWeight::Bold);
         ctx.set_font_size(16.);
 
-        let text = format!("{:.1}%", self.cpu_usage_points.back().unwrap());
+        let text = format!("{:.1}%", self.cpu_usage_points.front().unwrap());
         let x = self.width as f64 / 2.;
         let y = self.height as f64 - 12.;
         self.text_centered_at(&text, x, y, 16., ctx)?;
@@ -472,12 +472,12 @@ impl App {
         ctx.move_to(text_x + 100., rect_origin_y + 10.);
         ctx.show_text(&format!(
             "  {}",
-            format_bytes(*self.read_bytes_points.back().unwrap())
+            format_bytes(*self.read_bytes_points.front().unwrap())
         ))?;
         ctx.move_to(text_x + 100., rect_origin_y + 22.);
         ctx.show_text(&format!(
             "  {}",
-            format_bytes(*self.written_bytes_points.back().unwrap())
+            format_bytes(*self.written_bytes_points.front().unwrap())
         ))?;
 
         let rect_origin_x = text_x + 150.;
@@ -499,31 +499,20 @@ impl App {
         ctx.stroke()?;
 
         ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
-        let read_bytes_max_val = 1.0f64.max(*self.read_bytes_points.iter().max().unwrap() as f64);
-        for (i, read_bytes_point) in self.read_bytes_points.iter().enumerate() {
-            let rect_height = *read_bytes_point as f64 / read_bytes_max_val * GRAPH_HEIGHT;
-            ctx.rectangle(
-                rect_origin_x + rect_size_x + 3. + GRAPH_LENGTH - i as f64 * GRAPH_BAR_WIDTH,
-                self.height as f64 - rect_height,
-                GRAPH_BAR_WIDTH,
-                rect_height,
-            );
-            ctx.fill()?;
-        }
+        self.graph_byte_values(
+            &self.read_bytes_points,
+            rect_origin_x + rect_size_x + 3.,
+            self.height as f64,
+            ctx,
+        )?;
 
         ctx.set_source_rgb(94. / 255., 1., 108. / 255.);
-        let written_bytes_max_val =
-            1.0f64.max(*self.written_bytes_points.iter().max().unwrap() as f64);
-        for (i, written_bytes_point) in self.written_bytes_points.iter().enumerate() {
-            let rect_height = *written_bytes_point as f64 / written_bytes_max_val * GRAPH_HEIGHT;
-            ctx.rectangle(
-                rect_origin_x + rect_size_x + 3. + GRAPH_LENGTH - i as f64 * GRAPH_BAR_WIDTH,
-                self.height as f64 - rect_height,
-                GRAPH_BAR_WIDTH,
-                rect_height,
-            );
-            ctx.fill()?;
-        }
+        self.graph_byte_values(
+            &self.written_bytes_points,
+            rect_origin_x + rect_size_x + 3.,
+            self.height as f64,
+            ctx,
+        )?;
 
         ctx.set_source_rgba(1., 1., 1., 0.6);
         ctx.set_line_width(1.);
@@ -621,12 +610,12 @@ impl App {
         ctx.move_to(text_x - 155., rect_origin_y + 10.);
         ctx.show_text(&format!(
             "  {}",
-            format_bytes(*self.uploaded_bytes_points.back().unwrap())
+            format_bytes(*self.uploaded_bytes_points.front().unwrap())
         ))?;
         ctx.move_to(text_x - 155., rect_origin_y + 22.);
         ctx.show_text(&format!(
             "  {}",
-            format_bytes(*self.downloaded_bytes_points.back().unwrap())
+            format_bytes(*self.downloaded_bytes_points.front().unwrap())
         ))?;
 
         let rect_origin_x = text_x - 150. - rect_size_x;
@@ -646,6 +635,22 @@ impl App {
         ctx.move_to(rect_origin_x - 2., rect_origin_y);
         ctx.rel_line_to(0., rect_size_y);
         ctx.stroke()?;
+
+        ctx.set_source_rgb(212. / 255., 79. / 255., 126. / 255.);
+        self.graph_byte_values(
+            &self.downloaded_bytes_points,
+            rect_origin_x - GRAPH_LENGTH - 3.,
+            self.height as f64,
+            ctx,
+        )?;
+
+        ctx.set_source_rgb(94. / 255., 1., 108. / 255.);
+        self.graph_byte_values(
+            &self.uploaded_bytes_points,
+            rect_origin_x - GRAPH_LENGTH - 3.,
+            self.height as f64,
+            ctx,
+        )?;
 
         Ok(())
     }
@@ -683,6 +688,27 @@ impl App {
         let x = x - (extents.width() / 2.);
         ctx.move_to(x, y);
         ctx.show_text(text)?;
+        Ok(())
+    }
+
+    fn graph_byte_values(
+        &self,
+        values: &VecDeque<u64>,
+        origin_x: f64,
+        origin_y: f64,
+        ctx: &cairo::Context,
+    ) -> Result<()> {
+        let read_bytes_max_val = 1.0f64.max(*values.iter().max().unwrap() as f64);
+        for (i, read_bytes_point) in values.iter().enumerate() {
+            let rect_height = *read_bytes_point as f64 / read_bytes_max_val * GRAPH_HEIGHT;
+            ctx.rectangle(
+                origin_x + GRAPH_LENGTH - i as f64 * GRAPH_BAR_WIDTH,
+                origin_y - rect_height,
+                GRAPH_BAR_WIDTH,
+                rect_height,
+            );
+            ctx.fill()?;
+        }
         Ok(())
     }
 }
